@@ -73,6 +73,11 @@ jobs:
           CONFIGEOF
           # Expand the config (resolve dependencies)
           make defconfig
+          # Override: build mt7530 DSA driver as module (=m) instead of builtin
+          # so it can be rmmod/insmod for fast testing via WiFi console
+          sed -i 's/CONFIG_NET_DSA_MT7530=y/CONFIG_NET_DSA_MT7530=m/' .config
+          # Resolve dependencies again after override
+          make oldconfig </dev/null
 
       - name: Download sources
         run: |
@@ -82,7 +87,7 @@ jobs:
       - name: Compile firmware
         run: |
           cd openwrt
-          make -j$(nproc)
+          make -j$(nproc) || make -j1 V=s
 
       - name: Organize artifacts
         run: |
@@ -90,8 +95,10 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/firmware
           cp *.bin $GITHUB_WORKSPACE/firmware/
           cp *.manifest $GITHUB_WORKSPACE/firmware/
-          # Include buildinfo and sha256sums
           cp sha256sums $GITHUB_WORKSPACE/firmware/ 2>/dev/null || true
+          # Collect the mt7530 module (.ko) for fast rmmod/insmod testing
+          find $GITHUB_WORKSPACE/openwrt/build_dir -name "mt7530*.ko" \
+            -exec cp {} $GITHUB_WORKSPACE/firmware/mt7530.ko \; 2>/dev/null || echo "mt7530.ko not found"
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
