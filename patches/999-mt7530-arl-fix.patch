@@ -1,0 +1,97 @@
+From ffffffffxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx Mon Sep 17 00:00:00 2001
+From: Custom build <custom@example.com>
+Date: Custom
+Subject: [PATCH] net: dsa: mt7530: add port_fast_age and fix ARL/aging bugs
+
+This patch fixes port-to-port forwarding failures on MT7621+MT7530
+boards (e.g. Xiaomi CR6608).
+
+Three changes:
+
+1. Implement the port_fast_age DSA callback so the DSA core can flush
+   dynamic ARL entries when a port leaves a bridge. Without this, stale
+   ARL entries persist and cause packets to be forwarded to the wrong
+   port after a device reboots or moves.
+
+2. Fix FDB entries not aging out: the ageing-time search must start from
+   tmp_age_count=1, because the per-entry aging counter is initialized
+   to AGE_CNT and a value of 0 means "already aged" (never removed).
+   (Upstream fix by Daniel Golle, commit e824e40d0e84)
+
+3. Set ds->ageing_time_min / ageing_time_max so the DSA core validates
+   the range before invoking the callback.
+
+Signed-off-by: Custom build
+---
+ drivers/net/dsa/mt7530.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+--- a/drivers/net/dsa/mt7530.c
++++ b/drivers/net/dsa/mt7530.c
+@@ -1023,12 +1023,16 @@ mt7530_set_ageing_time(struct dsa_switch *ds, unsigned int msecs)
+ 	unsigned int age_count;
+ 	unsigned int age_unit;
+
+-	/* Applied timer is (AGE_CNT + 1) * (AGE_UNIT + 1) seconds */
+-	if (secs < 1 || secs > (AGE_CNT_MAX + 1) * (AGE_UNIT_MAX + 1))
+-		return -ERANGE;
+-
+-	/* iterate through all possible age_count to find the closest pair */
+-	for (tmp_age_count = 0; tmp_age_count <= AGE_CNT_MAX; ++tmp_age_count) {
++	/* Applied timer is (AGE_CNT + 1) * (AGE_UNIT + 1) seconds.
++	 * The DSA core has already validated the range using
++	 * ds->ageing_time_min and ds->ageing_time_max.
++	 *
++	 * Iterate through all possible age_count values to find the closest
++	 * pair. Start from 1 because the per-entry aging counter is
++	 * initialized to AGE_CNT and a value of 0 means the entry will
++	 * never be aged out.
++	 */
++	for (tmp_age_count = 1; tmp_age_count <= AGE_CNT_MAX; ++tmp_age_count) {
+ 		unsigned int tmp_age_unit = secs / (tmp_age_count + 1) - 1;
+
+ 		if (tmp_age_unit <= AGE_UNIT_MAX) {
+@@ -2428,6 +2432,8 @@ mt7530_setup(struct dsa_switch *ds)
+
+ 	ds->assisted_learning_on_cpu_port = true;
+ 	ds->mtu_enforcement_ingress = true;
++	ds->ageing_time_min = 2 * 1000;
++	ds->ageing_time_max = (AGE_CNT_MAX + 1) * (AGE_UNIT_MAX + 1) * 1000;
+
+ 	if (priv->id == ID_MT7530) {
+ 		regulator_set_voltage(priv->core_pwr, 1000000, 1000000);
+@@ -2617,6 +2623,8 @@ mt7531_setup_common(struct dsa_switch *ds)
+
+ 	ds->assisted_learning_on_cpu_port = true;
+ 	ds->mtu_enforcement_ingress = true;
++	ds->ageing_time_min = 2 * 1000;
++	ds->ageing_time_max = (AGE_CNT_MAX + 1) * (AGE_UNIT_MAX + 1) * 1000;
+
+ 	mt753x_trap_frames(priv);
+
+@@ -2650,6 +2658,18 @@ mt7530_port_bridge_leave(struct dsa_switch *ds, int port,
+ 	mutex_unlock(&priv->reg_mutex);
+ }
+
++static void
++mt7530_port_fast_age(struct dsa_switch *ds, int port)
++{
++	struct mt7530_priv *priv = ds->priv;
++
++	mutex_lock(&priv->reg_mutex);
++	/* MT7530 does not support per-port flush; flush all dynamic entries. */
++	mt7530_fdb_cmd(priv, MT7530_FDB_FLUSH, NULL);
++	mutex_unlock(&priv->reg_mutex);
++}
++
+ static int
+ mt7530_port_fdb_add(struct dsa_switch *ds, int port,
+ 		    const unsigned char *addr, u16 vid,
+@@ -2900,6 +2920,7 @@ static const struct dsa_switch_ops mt7530_switch_ops = {
+ 	.port_bridge_flags	= mt7530_port_bridge_flags,
+ 	.port_bridge_join	= mt7530_port_bridge_join,
+ 	.port_bridge_leave	= mt7530_port_bridge_leave,
++	.port_fast_age		= mt7530_port_fast_age,
+ 	.port_fdb_add		= mt7530_port_fdb_add,
+ 	.port_fdb_del		= mt7530_port_fdb_del,
+ 	.port_fdb_dump		= mt7530_port_fdb_dump,

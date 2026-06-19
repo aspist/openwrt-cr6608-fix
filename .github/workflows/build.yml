@@ -1,0 +1,102 @@
+name: Build OpenWrt for CR6608
+
+on:
+  # Trigger manually from Actions tab
+  workflow_dispatch:
+  # Trigger on push to main
+  push:
+    branches: [ main ]
+
+env:
+  # Use official OpenWrt 25.12.4 (matches currently installed firmware)
+  OPENWRT_URL: https://github.com/openwrt/openwrt.git
+  OPENWRT_BRANCH: v25.12.4
+  TARGET: ramips/mt7621
+  DEVICE: xiaomi_mi-router-cr6608
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout custom config
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "=== Freeing disk space ==="
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h
+
+      - name: Set up build environment
+        run: |
+          echo "=== Installing dependencies ==="
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison gawk gperf \
+            git wget rsync unzip zlib1g-dev libncurses-dev libssl-dev \
+            libelf-dev python3 python3-distutils python3-setuptools \
+            xz-utils file nano ccache ecj fastjar help2man diffstat \
+            quilt asmutils
+
+      - name: Clone OpenWrt source
+        run: |
+          echo "=== Cloning OpenWrt $OPENWRT_BRANCH ==="
+          git clone --depth 1 --branch $OPENWRT_BRANCH $OPENWRT_URL openwrt
+
+      - name: Apply custom patches
+        run: |
+          echo "=== Applying custom patches ==="
+          cd openwrt
+          bash $GITHUB_WORKSPACE/diy.sh
+
+      - name: Update & install feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure build
+        run: |
+          cd openwrt
+          # Generate .config targeting CR6608
+          cat > .config << 'CONFIGEOF'
+          CONFIG_TARGET_ramips=y
+          CONFIG_TARGET_ramips_mt7621=y
+          CONFIG_TARGET_ramips_mt7621_DEVICE_xiaomi_mi-router-cr6608=y
+          CONFIG_TARGET_PER_DEVICE_ROOTFS=y
+
+          CONFIG_PACKAGE_ethtool=y
+          CONFIG_PACKAGE_tcpdump=y
+          CONFIG_PACKAGE_phytool=y
+          CONFIG_PACKAGE_mdio-tools=y
+          CONFIG_PACKAGE_tc-tiny=y
+          CONFIGEOF
+          # Expand the config (resolve dependencies)
+          make defconfig
+
+      - name: Download sources
+        run: |
+          cd openwrt
+          make download -j$(nproc)
+
+      - name: Compile firmware
+        run: |
+          cd openwrt
+          make -j$(nproc)
+
+      - name: Organize artifacts
+        run: |
+          cd openwrt/bin/targets/ramips/mt7621
+          mkdir -p $GITHUB_WORKSPACE/firmware
+          cp *.bin $GITHUB_WORKSPACE/firmware/
+          cp *.manifest $GITHUB_WORKSPACE/firmware/
+          # Include buildinfo and sha256sums
+          cp sha256sums $GITHUB_WORKSPACE/firmware/ 2>/dev/null || true
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-cr6608-mt7530-fix
+          path: ${{ github.workspace }}/firmware/
+          retention-days: 30
